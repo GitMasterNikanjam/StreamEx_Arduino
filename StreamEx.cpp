@@ -1,6 +1,6 @@
 /**
  * @file StreamEx.cpp
- * @brief Definitions for StreamEx utilities (Arduino-friendly).
+ * @brief Definitions for StreamEx utilities and Stream adapter (Arduino-friendly).
  */
 #include "StreamEx.h"
 
@@ -12,7 +12,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-namespace StreamEx
+using namespace StreamEx_utility; // for internal use below (validators, converters)
+
+namespace StreamEx_utility
 {
 
 size_t safe_strnlen(const char* str, size_t maxlen)
@@ -215,4 +217,374 @@ void dataValueToString(char *out, size_t outCap,
     }
 }
 
-} // namespace StreamEx
+} // namespace StreamEx_utility
+
+
+// ###########################################################################################################
+//                                        StreamEx class
+// ###########################################################################################################
+
+
+StreamEx::StreamEx(char* txBuffer, uint32_t txBufferSize, char* rxBuffer, uint32_t rxBufferSize)
+: errorCode(StreamExError::None),
+_txBuffer(txBuffer), _rxBuffer(rxBuffer),
+_txBufferSize(txBufferSize), _rxBufferSize(rxBufferSize),
+_txPosition(0), _rxPosition(0)
+{
+    // Null-terminate the remaining buffer (optional for string usage)
+    if (_txBuffer && _txBufferSize) memset(_txBuffer, 0, _txBufferSize);
+    if (_rxBuffer && _rxBufferSize) memset(_rxBuffer, 0, _rxBufferSize);
+}
+
+StreamEx::~StreamEx() { /* no-op (no ownership) */ }
+
+void StreamEx::setTxBuffer(char* txBuffer, uint32_t txBufferSize)
+{
+    _txBuffer      = txBuffer;
+    _txBufferSize  = txBufferSize;
+    _txPosition    = 0;
+    if (_txBuffer && _txBufferSize) memset(_txBuffer, 0, _txBufferSize);
+}
+
+void StreamEx::setRxBuffer(char* rxBuffer, uint32_t rxBufferSize)
+{
+    _rxBuffer      = rxBuffer;
+    _rxBufferSize  = rxBufferSize;
+    _rxPosition    = 0;
+    if (_rxBuffer && _rxBufferSize) memset(_rxBuffer, 0, _rxBufferSize);
+}
+
+void StreamEx::clearTxBuffer() 
+{
+    if (_txBuffer && _txBufferSize) memset(_txBuffer, 0, _txBufferSize);
+    _txPosition = 0;
+}
+
+void StreamEx::clearRxBuffer() 
+{
+    if (_rxBuffer && _rxBufferSize) memset(_rxBuffer, 0, _rxBufferSize);
+    _rxPosition = 0;
+}
+
+// ----- internal helpers -----
+
+void StreamEx::_dropFrontTx(uint32_t n){
+    if (!_txBuffer || _txPosition == 0 || n == 0) return;
+    if (n >= _txPosition) { _txPosition = 0; _txBuffer[0] = '\0'; return; }
+    memmove(_txBuffer, _txBuffer + n, _txPosition - n);
+    _txPosition -= n;
+    _txBuffer[_txPosition] = '\0';
+}
+
+void StreamEx::_dropFrontRx(uint32_t n){
+    if (!_rxBuffer || _rxPosition == 0 || n == 0) return;
+    if (n >= _rxPosition) { _rxPosition = 0; _rxBuffer[0] = '\0'; return; }
+    memmove(_rxBuffer, _rxBuffer + n, _rxPosition - n);
+    _rxPosition -= n;
+    _rxBuffer[_rxPosition] = '\0';
+}
+
+// ----- append / pop APIs -----
+
+const char* StreamEx::getTxBuffer() 
+{
+    return _txBuffer;
+}
+
+uint32_t StreamEx::getTxBufferSize() 
+{
+    return _txBufferSize;
+}
+
+const char* StreamEx::getRxBuffer() 
+{
+    return _rxBuffer;
+}
+
+uint32_t StreamEx::getRxBufferSize() 
+{
+    return _rxBufferSize;
+}
+
+bool StreamEx::writeTxBuffer(const char* data, uint32_t dataSize) 
+{
+    if (dataSize > _txBufferSize) 
+    {
+        errorCode = 1;  // "Error StreamEx: Data size exceeds TX buffer size.";
+        return false;
+    }
+    memcpy(_txBuffer, data, dataSize); // Copy data to TX buffer
+    _txPosition = dataSize;
+
+    return true;
+}
+
+bool StreamEx::writeRxBuffer(const char* data, uint32_t dataSize) 
+{
+    if (dataSize > _rxBufferSize) 
+    {
+        errorCode = 1;  // "Error StreamEx: Data size exceeds RX buffer size.";
+        return false;
+    }
+    memcpy(_rxBuffer, data, dataSize); // Copy data to RX buffer
+    _rxPosition = dataSize;
+
+    return true;
+}
+
+bool StreamEx::pushBackTxBuffer(const char* data, uint32_t dataSize)
+{
+    if (!data) { errorCode = StreamExError::NullData; return false; }
+    if (!_txBuffer || _txBufferSize == 0) { errorCode = StreamExError::BufferOverflow; return false; }
+
+    // empty space size of tx buffer.
+    const uint32_t freeCap = (_txBufferSize > _txPosition) ? (_txBufferSize - _txPosition - 1) : 0;
+
+    // Check for buffer overflow
+    if (dataSize > freeCap){
+        // Truncate from the front (sliding window)
+        const uint32_t need = dataSize - freeCap;
+        _dropFrontTx(need);
+        errorCode = StreamExError::BufferOverflow;
+    }
+
+    const uint32_t canCopy = min<uint32_t>(dataSize, (_txBufferSize - _txPosition - 1));
+    if (canCopy){
+        memcpy(_txBuffer + _txPosition, data, canCopy);
+        _txPosition += canCopy;
+        _txBuffer[_txPosition] = '\0';
+    }
+    return (canCopy == dataSize);
+}
+
+bool StreamEx::pushBackTxBuffer(const std::string* data)
+{
+    if (!data) { errorCode = StreamExError::NullData; return false; }
+    return pushBackTxBuffer(data->c_str(), (uint32_t)data->size());
+}
+
+bool StreamEx::pushBackRxBuffer(const char* data, uint32_t dataSize)
+{
+    if (!data) { errorCode = StreamExError::NullData; return false; }
+    if (!_rxBuffer || _rxBufferSize == 0) { errorCode = StreamExError::BufferOverflow; return false; }
+
+    const uint32_t freeCap = (_rxBufferSize > _rxPosition) ? (_rxBufferSize - _rxPosition - 1) : 0;
+
+    if (dataSize > freeCap){
+        const uint32_t need = dataSize - freeCap;
+        _dropFrontRx(need);
+        errorCode = StreamExError::BufferOverflow;
+    }
+
+    const uint32_t canCopy = min<uint32_t>(dataSize, (_rxBufferSize - _rxPosition - 1));
+    if (canCopy){
+        memcpy(_rxBuffer + _rxPosition, data, canCopy);
+        _rxPosition += canCopy;
+        _rxBuffer[_rxPosition] = '\0';
+    }
+    return (canCopy == dataSize);
+}
+
+bool StreamEx::pushBackRxBuffer(const std::string* data)
+{
+    if (!data) { errorCode = StreamExError::NullData; return false; }
+    return pushBackRxBuffer(data->c_str(), (uint32_t)data->size()); 
+}
+
+bool StreamEx::popFrontTxBuffer(char* data, uint32_t dataSize)
+{
+    if (!out) { errorCode = StreamExError::NullData; return false; }
+    if (dataSize == 0) { errorCode = StreamExError::SizeZero; return false; }
+
+    if (dataSize > _txPosition){
+        // clamp and signal
+        dataSize = _txPosition;
+        errorCode = StreamExError::NotEnoughData;
+    }
+    if (dataSize == 0) { out[0] = '\0'; return false; }
+
+    memcpy(out, _txBuffer, dataSize);
+    _dropFrontTx(dataSize);
+    return (errorCode != StreamExError::NotEnoughData);
+}
+
+bool StreamEx::popFrontTxBuffer(std::string* out, uint32_t dataSize)
+{
+    if (!out) { errorCode = StreamExError::NullData; return false; }
+    if (dataSize > _txPosition){
+        dataSize = _txPosition;
+        errorCode = StreamExError::NotEnoughData;
+    }
+    out->assign(_txBuffer, _txBuffer + dataSize);
+    _dropFrontTx(dataSize);
+    return (errorCode != StreamExError::NotEnoughData);
+}
+
+bool StreamEx::popAllTxBuffer(char* out, uint32_t maxSize){
+    if (!out) { errorCode = StreamExError::NullData; return false; }
+    if (maxSize == 0) { errorCode = StreamExError::SizeZero; return false; }
+    uint32_t take = min<uint32_t>(_txPosition, maxSize);
+    memcpy(out, _txBuffer, take);
+    _dropFrontTx(take);
+    return (take == maxSize || _txPosition == 0);
+}
+
+bool StreamEx::popAllTxBuffer(std::string* out){
+    if (!out) { errorCode = StreamExError::NullData; return false; }
+    out->assign(_txBuffer, _txBuffer + _txPosition);
+    _dropFrontTx(_txPosition);
+    return true;
+}
+
+bool StreamEx::popFrontRxBuffer(char* out, uint32_t dataSize){
+    if (!out) { errorCode = StreamExError::NullData; return false; }
+    if (dataSize == 0) { errorCode = StreamExError::SizeZero; return false; }
+    if (dataSize > _rxPosition){
+        dataSize = _rxPosition;
+        errorCode = StreamExError::NotEnoughData;
+    }
+    if (dataSize == 0) { out[0] = '\0'; return false; }
+    memcpy(out, _rxBuffer, dataSize);
+    _dropFrontRx(dataSize);
+    return (errorCode != StreamExError::NotEnoughData);
+}
+
+bool StreamEx::popFrontRxBuffer(std::string* out, uint32_t dataSize){
+    if (!out) { errorCode = StreamExError::NullData; return false; }
+    if (dataSize > _rxPosition){
+        dataSize = _rxPosition;
+        errorCode = StreamExError::NotEnoughData;
+    }
+    out->assign(_rxBuffer, _rxBuffer + dataSize);
+    _dropFrontRx(dataSize);
+    return (errorCode != StreamExError::NotEnoughData);
+}
+
+bool StreamEx::popAllRxBuffer(char* out, uint32_t maxSize){
+    if (!out) { errorCode = StreamExError::NullData; return false; }
+    if (maxSize == 0) { errorCode = StreamExError::SizeZero; return false; }
+    uint32_t take = min<uint32_t>(_rxPosition, maxSize);
+    memcpy(out, _rxBuffer, take);
+    _dropFrontRx(take);
+    return (take == maxSize || _rxPosition == 0);
+}
+
+bool StreamEx::popAllRxBuffer(std::string* out){
+    if (!out) { errorCode = StreamExError::NullData; return false; }
+    out->assign(_rxBuffer, _rxBuffer + _rxPosition);
+    _dropFrontRx(_rxPosition);
+    return true;
+}
+
+// ----------------------------------------------
+
+bool StreamEx::removeFrontTxBuffer(uint32_t dataSize)
+{
+    if (dataSize > _txPosition) 
+    {
+        errorCode = 1; // Not enough data in the buffer to pop
+        return false;
+    }
+
+    // Shift the remaining data in the TX buffer
+    std::memmove(_txBuffer, _txBuffer + dataSize, _txPosition - dataSize);
+
+    // Update the TX buffer position
+    _txPosition -= dataSize;
+
+    // Null-terminate the remaining buffer (optional for string usage)
+    _txBuffer[_txPosition] = '\0';
+
+    return true;
+}
+
+bool StreamEx::removeFrontRxBuffer(uint32_t dataSize)
+{
+    if (dataSize > _rxPosition) 
+    {
+        errorCode = 1; // Not enough data in the buffer to pop
+        return false;
+    }
+
+    // Shift the remaining data in the TX buffer
+    std::memmove(_rxBuffer, _rxBuffer + dataSize, _rxPosition - dataSize);
+
+    // Update the TX buffer position
+    _rxPosition -= dataSize;
+
+    // Null-terminate the remaining buffer (optional for string usage)
+    _rxBuffer[_rxPosition] = '\0';
+
+    return true;
+}
+
+bool StreamEx::popFrontTxBuffer(std::string* data, uint32_t dataSize)
+{
+    if(data == nullptr)
+    {
+        errorCode = 1;
+        return false;
+    }
+
+    if (dataSize > _txPosition) 
+    {
+        errorCode = 2; // Not enough data in the buffer to pop
+        return false;
+    }
+
+    // Assign the requested portion of data to the std::string
+    *data = std::string(_txBuffer, dataSize);
+
+    // Shift the remaining data in the TX buffer
+    std::memmove(_txBuffer, _txBuffer + dataSize, _txPosition - dataSize);
+
+    // Update the TX buffer position
+    _txPosition -= dataSize;
+
+    // Null-terminate the remaining buffer (optional for safety if treated as a string)
+    _txBuffer[_txPosition] = '\0';
+
+    return true;
+}
+
+// ---------------- Arduino Stream interface ----------------
+
+int StreamEx::available() {
+    return (int)_rxPosition;
+}
+
+int StreamEx::read() {
+    if (_rxPosition == 0 || !_rxBuffer) return -1;
+    uint8_t b = (uint8_t)_rxBuffer[0];
+    _dropFrontRx(1);
+    return (int)b;
+}
+
+int StreamEx::peek() {
+    if (_rxPosition == 0 || !_rxBuffer) return -1;
+    return (uint8_t)_rxBuffer[0];
+}
+
+void StreamEx::flush() {
+    // Stream::flush is typically for TX on serial drivers.
+    // Here we interpret it as "TX is delivered" → clear TX buffer.
+    clearTxBuffer();
+}
+
+size_t StreamEx::write(uint8_t b) {
+    return write(&b, 1);
+}
+
+size_t StreamEx::write(const uint8_t* buffer, size_t size) {
+    if (!buffer || size == 0) { errorCode = StreamExError::SizeZero; return 0; }
+    const bool ok = pushBackTxBuffer((const char*)buffer, (uint32_t)size);
+    return ok ? size : (size_t)(_txPosition); // if overflow we still appended as much as we could
+}
+
+uint32_t StreamEx::availableRx() 
+{
+    // return strlen(_rxBuffer);
+    return _rxPosition;
+}
+
+
