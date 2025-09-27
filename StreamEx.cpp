@@ -88,6 +88,67 @@ void trimString(char* buf, uint32_t maxSize)
     buf[out] = '\0';
 }
 
+bool splitString(const char* data, char delimiter, char* firstSection, char* secondSection)
+{
+    if (!data) return false;
+    const char* p = strchr(data, delimiter);
+    if (!p) return false;                 // delimiter not found
+    const size_t n1 = (size_t)(p - data); // bytes before delimiter
+    if (firstSection) {
+        memcpy(firstSection, data, n1);
+        firstSection[n1] = '\0';
+    }
+    if (secondSection) {
+        const char* rest = p + 1;
+        const size_t n2 = strlen(rest);
+        memcpy(secondSection, rest, n2);
+        secondSection[n2] = '\0';
+    }
+    return true;
+}
+
+bool isWhitespaceOnly(const char* str)
+{
+     if (!str) return true;
+    while (*str) {
+        if (*str != ' ' && *str != '\t' && *str != '\n' &&
+            *str != '\v' && *str != '\f' && *str != '\r') {
+            return false;
+        }
+        ++str;
+    }
+    return true;
+}
+
+bool validateRow(const char* data, size_t expectedColumnCount)
+{
+    if (!data) return false;
+    size_t count = 0;
+    const char* tokenStart = data;
+    const char* p = data;
+
+    for (;;) {
+        if (*p == ',' || *p == '\0') {
+            // Check token [tokenStart, p)
+            const char* s = tokenStart;
+            bool allWs = true;
+            while (s < p) {
+                if (*s != ' ' && *s != '\t' && *s != '\n' &&
+                    *s != '\v' && *s != '\f' && *s != '\r') {
+                    allWs = false; break;
+                }
+                ++s;
+            }
+            if (allWs) return false; // empty or whitespace-only field
+            ++count;
+            if (*p == '\0') break;
+            tokenStart = p + 1;
+        }
+        ++p;
+    }
+    return (count == expectedColumnCount);
+}
+
 // ---------- Validators (typed) ----------
 
 bool isUInt8 (const char* s){ if(!isUInteger(s)) return false; char* e=nullptr; unsigned long v=strtoul(s,&e,10); return e && *e=='\0' && v<=0xFFUL; }
@@ -285,6 +346,7 @@ void StreamEx::_dropFrontRx(uint32_t n){
 
 bool StreamEx::writeTxBuffer(const char* data, uint32_t dataSize) 
 {
+    if ((data == nullptr && dataSize > 0)) { errorCode = StreamExError::NullData; return false; }
     if (dataSize > _txBufferSize) { errorCode = StreamExError::BufferOverflow; return false; }
 
     memcpy(_txBuffer, data, dataSize); // Copy data to TX buffer
@@ -300,6 +362,7 @@ bool StreamEx::writeTxBuffer(const char* data, uint32_t dataSize)
 
 bool StreamEx::writeRxBuffer(const char* data, uint32_t dataSize) 
 {
+    if ((data == nullptr && dataSize > 0)) { errorCode = StreamExError::NullData; return false; }
     if (dataSize > _rxBufferSize) { errorCode = StreamExError::BufferOverflow; return false; }
 
     memcpy(_rxBuffer, data, dataSize); // Copy data to RX buffer

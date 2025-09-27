@@ -175,6 +175,27 @@ bool isUInteger(const char* s);
  */
 void trimString(char* buf, uint32_t maxSize = 0);
 
+/**
+ * @brief Function to split a string by a delimiter in two section and return a splited strings.
+ * @param firstSection is the first part of splited string.
+ * @param secondSection is the second part of splited string.
+ * @return true if splited succeeded.
+ */
+bool splitString(const char* data, char delimiter, char* firstSection = nullptr, char* secondSection = nullptr);
+
+/**
+ * @brief Function to check if a string is empty or contains only spaces.
+ * @return true if succeeded.
+ */
+bool isWhitespaceOnly(const char* data);
+
+/**
+ * @brief Function to validate a string has the expected sections that splited by ',' character.
+ * @note if any sections be empty space it returns false.
+ * @return true if succeeded.
+ */
+bool validateRow(const char* data, size_t expectedColumnCount);
+
 // --- Typed validators ---
 
 /** @brief Validate 0..255 range. */
